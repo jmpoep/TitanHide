@@ -149,8 +149,16 @@ jobs:
 
         function Get-PeSubsystemVersion([string]$path) {
           $bytes = [IO.File]::ReadAllBytes((Resolve-Path $path))
+          if ($bytes.Length -lt 64) { throw "PE image is truncated: $path" }
           $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
           $optionalHeader = $peOffset + 24
+          if ($peOffset -lt 0 -or $optionalHeader + 52 -gt $bytes.Length) { throw "PE optional header is invalid: $path" }
+          $magic = [BitConverter]::ToUInt16($bytes, $optionalHeader)
+          if ($magic -notin @(0x010b, 0x020b)) { throw "PE optional header has an unsupported format: $path" }
+
+          # MajorSubsystemVersion and MinorSubsystemVersion are at +48/+50
+          # in both PE32 and PE32+. PE32's BaseOfData is balanced by PE32+
+          # widening ImageBase from four to eight bytes.
           return [Version]::new(
             [BitConverter]::ToUInt16($bytes, $optionalHeader + 48),
             [BitConverter]::ToUInt16($bytes, $optionalHeader + 50))
