@@ -35,6 +35,26 @@ static KMUTEX gDebugPortMutex;
 
 #define OBJ_PROTECT_CLOSE 0x00000001L
 
+static bool IsDebugObjectTypeInformation(
+    OBJECT_TYPE_INFORMATION* TypeInformation,
+    ULONG ObjectInformationLength,
+    const UNICODE_STRING* DebugObject)
+{
+    if(ObjectInformationLength < sizeof(OBJECT_TYPE_INFORMATION) + DebugObject->Length)
+        return false;
+
+    ProbeForRead(TypeInformation, sizeof(OBJECT_TYPE_INFORMATION), 1);
+    if(TypeInformation->TypeName.Length != DebugObject->Length)
+        return false;
+
+    // NtQueryObject stores the type name directly after the fixed-size structure.
+    // Do not use TypeName.Buffer here: ReturnLength is written last by the kernel
+    // and callers may deliberately overlap it with that pointer.
+    WCHAR* InlineTypeName = (WCHAR*)(TypeInformation + 1);
+    ProbeForRead(InlineTypeName, DebugObject->Length, 1);
+    return RtlCompareMemory(InlineTypeName, DebugObject->Buffer, DebugObject->Length) == DebugObject->Length;
+}
+
 static NTSTATUS NTAPI HookNtQueryInformationThread(
     IN HANDLE ThreadHandle,
     IN THREADINFOCLASS ThreadInformationClass,
@@ -393,12 +413,16 @@ static NTSTATUS NTAPI HookNtQueryObject(
                 BACKUP_RETURNLENGTH();
 
                 OBJECT_TYPE_INFORMATION* type = (OBJECT_TYPE_INFORMATION*)ObjectInformation;
-                ProbeForRead(type->TypeName.Buffer, 1, 1);
-                if(RtlEqualUnicodeString(&type->TypeName, &DebugObject, FALSE)) //DebugObject
+                if(IsDebugObjectTypeInformation(type, ObjectInformationLength, &DebugObject))
                 {
                     Log("[TITANHIDE] DebugObject by %d\r\n", pid);
-                    type->TotalNumberOfObjects = 0;
-                    type->TotalNumberOfHandles = 0;
+
+                    // Remove the debugger's object and handle while preserving objects
+                    // created by the debuggee itself.
+                    if(type->TotalNumberOfObjects != 0)
+                        type->TotalNumberOfObjects--;
+                    if(type->TotalNumberOfHandles != 0)
+                        type->TotalNumberOfHandles--;
                 }
 
                 RESTORE_RETURNLENGTH();
@@ -426,9 +450,10 @@ static NTSTATUS NTAPI HookNtQueryObject(
                     if(RtlEqualUnicodeString(&pObjectTypeInfo->TypeName, &DebugObject, FALSE)) //DebugObject
                     {
                         Log("[TITANHIDE] DebugObject by %d\r\n", pid);
-                        pObjectTypeInfo->TotalNumberOfObjects = 0;
-                        //Bug found by Aguila, thanks!
-                        pObjectTypeInfo->TotalNumberOfHandles = 0;
+                        if(pObjectTypeInfo->TotalNumberOfObjects != 0)
+                            pObjectTypeInfo->TotalNumberOfObjects--;
+                        if(pObjectTypeInfo->TotalNumberOfHandles != 0)
+                            pObjectTypeInfo->TotalNumberOfHandles--;
                     }
                     pObjInfoLocation = (unsigned char*)pObjectTypeInfo->TypeName.Buffer;
                     pObjInfoLocation += pObjectTypeInfo->TypeName.MaximumLength;

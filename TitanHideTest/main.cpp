@@ -127,8 +127,8 @@ bool HideFromDebugger()
 typedef struct _OBJECT_TYPE_INFORMATION
 {
     UNICODE_STRING TypeName;
-    ULONG TotalNumberOfHandles;
     ULONG TotalNumberOfObjects;
+    ULONG TotalNumberOfHandles;
 } OBJECT_TYPE_INFORMATION, *POBJECT_TYPE_INFORMATION;
 
 typedef struct _OBJECT_ALL_INFORMATION
@@ -145,6 +145,79 @@ typedef enum _OBJECT_INFORMATION_CLASS
     ObjectTypesInformation,
     ObjectDataInformation
 } OBJECT_INFORMATION_CLASS, *POBJECT_INFORMATION_CLASS;
+
+typedef struct _TEST_OBJECT_ATTRIBUTES
+{
+    ULONG Length;
+    HANDLE RootDirectory;
+    PUNICODE_STRING ObjectName;
+    ULONG Attributes;
+    PVOID SecurityDescriptor;
+    PVOID SecurityQualityOfService;
+} TEST_OBJECT_ATTRIBUTES, *PTEST_OBJECT_ATTRIBUTES;
+
+bool CheckObjectTypeInformation()
+{
+    typedef NTSTATUS(NTAPI * pNtCreateDebugObject)(PHANDLE, ULONG, PTEST_OBJECT_ATTRIBUTES, ULONG);
+    typedef NTSTATUS(NTAPI * pNtQueryObject)(HANDLE, OBJECT_INFORMATION_CLASS, PVOID, ULONG, PULONG);
+
+    pNtCreateDebugObject NtCDO = (pNtCreateDebugObject)GetProcAddress(
+                                      GetModuleHandle(TEXT("ntdll.dll")),
+                                      "NtCreateDebugObject");
+    pNtQueryObject NtQO = (pNtQueryObject)GetProcAddress(
+                              GetModuleHandle(TEXT("ntdll.dll")),
+                              "NtQueryObject");
+    if(NtCDO == NULL || NtQO == NULL)
+        return false;
+
+    TEST_OBJECT_ATTRIBUTES ObjectAttributes = { sizeof(TEST_OBJECT_ATTRIBUTES) };
+    HANDLE DebugObjectHandle = NULL;
+    NTSTATUS Status = NtCDO(&DebugObjectHandle, 0x0008, &ObjectAttributes, 0);
+    if(!NT_SUCCESS(Status))
+        return false;
+
+    bool Detected = false;
+    ULONG RequiredLength = 0;
+    Status = NtQO(DebugObjectHandle, ObjectTypeInformation, NULL, 0, &RequiredLength);
+    if(Status != (NTSTATUS)0xC0000004L || RequiredLength < sizeof(OBJECT_TYPE_INFORMATION)) // STATUS_INFO_LENGTH_MISMATCH
+    {
+        Detected = true;
+    }
+    else
+    {
+        OBJECT_TYPE_INFORMATION* TypeInformation = (OBJECT_TYPE_INFORMATION*)HeapAlloc(
+                    GetProcessHeap(), HEAP_ZERO_MEMORY, RequiredLength);
+        if(TypeInformation == NULL)
+        {
+            Detected = true;
+        }
+        else
+        {
+            Status = NtQO(DebugObjectHandle, ObjectTypeInformation, TypeInformation, RequiredLength, NULL);
+            if(!NT_SUCCESS(Status) || TypeInformation->TotalNumberOfObjects == 0 || TypeInformation->TotalNumberOfHandles == 0)
+                Detected = true;
+
+            // VMProtect 3.9.5+ overlaps ReturnLength with TypeName.Buffer.
+            Status = NtQO(DebugObjectHandle,
+                          ObjectTypeInformation,
+                          TypeInformation,
+                          RequiredLength,
+                          (PULONG)&TypeInformation->TypeName.Buffer);
+            if(!NT_SUCCESS(Status) ||
+                    *(PULONG)&TypeInformation->TypeName.Buffer != RequiredLength ||
+                    TypeInformation->TotalNumberOfObjects == 0 ||
+                    TypeInformation->TotalNumberOfHandles == 0)
+            {
+                Detected = true;
+            }
+
+            HeapFree(GetProcessHeap(), 0, TypeInformation);
+        }
+    }
+
+    CloseHandle(DebugObjectHandle);
+    return Detected;
+}
 
 // ObjectListCheck uses NtQueryObject to check the environments
 // list of objects and more specifically for the number of
@@ -395,12 +468,15 @@ int main(int argc, char* argv[])
         printf("ProcessDebugPort: %d\n", CheckProcessDebugPort());
         printf("ProcessDebugObjectHandle: %d\n", CheckProcessDebugObjectHandle());
         printf("NtQueryObject: %d\n", CheckObjectList());
+        printf("NtQueryObjectType: %d\n", CheckObjectTypeInformation());
         printf("CheckSystemDebugger: %d\n", CheckSystemDebugger());
         if(!IsWow64)  // This syscall is not implemented in wow64.dll
             printf("SystemDebugControl: %d\n", CheckSystemDebugControl());
         printf("CheckNtClose: %d\n", CheckNtClose());
         //printf("ThreadHideFromDebugger: %d\n", HideFromDebugger());
         puts("");
+        if(argc > 1)
+            break;
         Sleep(1000);
     }
     /*int pid=0;
