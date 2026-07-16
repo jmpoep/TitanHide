@@ -176,6 +176,26 @@ bool CheckObjectTypeInformation()
     if(!NT_SUCCESS(Status))
         return false;
 
+    // Preserve every handle owned by the protected process, not merely one.
+    // The active debugger may independently hold multiple handles to its own
+    // debug object, all of which should be removed from the reported total.
+    HANDLE DuplicateHandles[2] = {};
+    ULONG OwnedHandleCount = 1;
+    for(HANDLE& DuplicatedHandle : DuplicateHandles)
+    {
+        if(DuplicateHandle(
+                    GetCurrentProcess(),
+                    DebugObjectHandle,
+                    GetCurrentProcess(),
+                    &DuplicatedHandle,
+                    0,
+                    FALSE,
+                    DUPLICATE_SAME_ACCESS))
+        {
+            OwnedHandleCount++;
+        }
+    }
+
     bool Detected = false;
     ULONG RequiredLength = 0;
     Status = NtQO(DebugObjectHandle, ObjectTypeInformation, NULL, 0, &RequiredLength);
@@ -194,8 +214,12 @@ bool CheckObjectTypeInformation()
         else
         {
             Status = NtQO(DebugObjectHandle, ObjectTypeInformation, TypeInformation, RequiredLength, NULL);
-            if(!NT_SUCCESS(Status) || TypeInformation->TotalNumberOfObjects == 0 || TypeInformation->TotalNumberOfHandles == 0)
+            if(!NT_SUCCESS(Status) ||
+                    TypeInformation->TotalNumberOfObjects == 0 ||
+                    TypeInformation->TotalNumberOfHandles < OwnedHandleCount)
+            {
                 Detected = true;
+            }
 
             // VMProtect 3.9.5+ overlaps ReturnLength with TypeName.Buffer.
             Status = NtQO(DebugObjectHandle,
@@ -206,7 +230,7 @@ bool CheckObjectTypeInformation()
             if(!NT_SUCCESS(Status) ||
                     *(PULONG)&TypeInformation->TypeName.Buffer != RequiredLength ||
                     TypeInformation->TotalNumberOfObjects == 0 ||
-                    TypeInformation->TotalNumberOfHandles == 0)
+                    TypeInformation->TotalNumberOfHandles < OwnedHandleCount)
             {
                 Detected = true;
             }
@@ -215,6 +239,11 @@ bool CheckObjectTypeInformation()
         }
     }
 
+    for(HANDLE DuplicatedHandle : DuplicateHandles)
+    {
+        if(DuplicatedHandle != NULL)
+            CloseHandle(DuplicatedHandle);
+    }
     CloseHandle(DebugObjectHandle);
     return Detected;
 }
